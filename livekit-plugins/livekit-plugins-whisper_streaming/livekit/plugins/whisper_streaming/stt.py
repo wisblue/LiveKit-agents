@@ -179,130 +179,130 @@ class SpeechStream(stt.SpeechStream):
         await self._queue.put(STREAM_CLOSE_MSG)
         await self._main_task
 
-    async def _run(self, max_retry: int) -> None:
-        """
-        Internal function.
-        Try to connect to Deepgram with exponential backoff and forward frames
-        """
-        async with aiohttp.ClientSession() as session:
-            retry_count = 0
-            ws: Optional[aiohttp.ClientWebSocketResponse] = None
-            listen_task: Optional[asyncio.Task] = None
-            keepalive_task: Optional[asyncio.Task] = None
-            while True:
-                try:
-                    ws = await self._try_connect(session)
-                    listen_task = asyncio.create_task(self._listen_loop(ws))
-                    keepalive_task = asyncio.create_task(self._keepalive_loop(ws))
-                    # break out of the retry loop if we are done
-                    if await self._send_loop(ws):
-                        keepalive_task.cancel()
-                        await asyncio.wait_for(listen_task, timeout=5)
-                        break
-                except Exception as e:
-                    if retry_count > max_retry and max_retry > 0:
-                        logging.error(f"failed to connect to Deepgram: {e}")
-                        break
+    # async def _run(self, max_retry: int) -> None:
+    #     """
+    #     Internal function.
+    #     Try to connect to Deepgram with exponential backoff and forward frames
+    #     """
+    #     async with aiohttp.ClientSession() as session:
+    #         retry_count = 0
+    #         ws: Optional[aiohttp.ClientWebSocketResponse] = None
+    #         listen_task: Optional[asyncio.Task] = None
+    #         keepalive_task: Optional[asyncio.Task] = None
+    #         while True:
+    #             try:
+    #                 ws = await self._try_connect(session)
+    #                 listen_task = asyncio.create_task(self._listen_loop(ws))
+    #                 keepalive_task = asyncio.create_task(self._keepalive_loop(ws))
+    #                 # break out of the retry loop if we are done
+    #                 if await self._send_loop(ws):
+    #                     keepalive_task.cancel()
+    #                     await asyncio.wait_for(listen_task, timeout=5)
+    #                     break
+    #             except Exception as e:
+    #                 if retry_count > max_retry and max_retry > 0:
+    #                     logging.error(f"failed to connect to Deepgram: {e}")
+    #                     break
 
-                    retry_delay = min(retry_count * 5, 5)  # max 5s
-                    retry_count += 1
-                    logging.warning(
-                        f"failed to connect to Deepgram: {e} - retrying in {retry_delay}s"
-                    )
-                    await asyncio.sleep(retry_delay)
+    #                 retry_delay = min(retry_count * 5, 5)  # max 5s
+    #                 retry_count += 1
+    #                 logging.warning(
+    #                     f"failed to connect to Deepgram: {e} - retrying in {retry_delay}s"
+    #                 )
+    #                 await asyncio.sleep(retry_delay)
 
-        self._closed = True
+    #     self._closed = True
 
-    async def _send_loop(self, ws: aiohttp.ClientWebSocketResponse) -> bool:
-        """
-        International function.
-        this is to send audio frames to the websocket.
-        """
-        while not ws.closed:
-            data = await self._queue.get()
-            # fire and forget, we don't care if we miss frames in the error case
-            self._queue.task_done()
+    # async def _send_loop(self, ws: aiohttp.ClientWebSocketResponse) -> bool:
+    #     """
+    #     International function.
+    #     this is to send audio frames to the websocket.
+    #     """
+    #     while not ws.closed:
+    #         data = await self._queue.get()
+    #         # fire and forget, we don't care if we miss frames in the error case
+    #         self._queue.task_done()
 
-            if ws.closed:
-                raise Exception("websocket closed")
+    #         if ws.closed:
+    #             raise Exception("websocket closed")
 
-            if isinstance(data, rtc.AudioFrame):
-                await ws.send_bytes(data.data.tobytes())
-            else:
-                if data == STREAM_CLOSE_MSG:
-                    await ws.send_str(data)
-                    return True
-        return False
+    #         if isinstance(data, rtc.AudioFrame):
+    #             await ws.send_bytes(data.data.tobytes())
+    #         else:
+    #             if data == STREAM_CLOSE_MSG:
+    #                 await ws.send_str(data)
+    #                 return True
+    #     return False
 
-    async def _keepalive_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        """
-        International function.
-        This is to keep the websocket alive.
-        """
-        while not ws.closed:
-            await ws.send_str(STREAM_KEEPALIVE_MSG)
-            await asyncio.sleep(5)
+    # async def _keepalive_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+    #     """
+    #     International function.
+    #     This is to keep the websocket alive.
+    #     """
+    #     while not ws.closed:
+    #         await ws.send_str(STREAM_KEEPALIVE_MSG)
+    #         await asyncio.sleep(5)
 
-    async def _listen_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        """
-        International function.
-        This is to listen to the websocket and parse the results.
-        """
-        while not ws.closed:
-            msg = await ws.receive()
-            if msg.type in (
-                aiohttp.WSMsgType.CLOSED,
-                aiohttp.WSMsgType.CLOSE,
-                aiohttp.WSMsgType.CLOSING,
-            ):
-                break
+    # async def _listen_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+    #     """
+    #     International function.
+    #     This is to listen to the websocket and parse the results.
+    #     """
+    #     while not ws.closed:
+    #         msg = await ws.receive()
+    #         if msg.type in (
+    #             aiohttp.WSMsgType.CLOSED,
+    #             aiohttp.WSMsgType.CLOSE,
+    #             aiohttp.WSMsgType.CLOSING,
+    #         ):
+    #             break
 
-            try:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    data = json.loads(msg.data)
-                    if data["type"] != "Results":
-                        logging.warning("Skipping non-results message %s", data)
-                        continue
-                    stt_event = live_transcription_to_speech_event(
-                        self._config.language, data
-                    )
-                    await self._event_queue.put(stt_event)
-                    continue
-            except Exception as e:
-                logging.error("Error handling message %s: %s", msg, e)
-                continue
+    #         try:
+    #             if msg.type == aiohttp.WSMsgType.TEXT:
+    #                 data = json.loads(msg.data)
+    #                 if data["type"] != "Results":
+    #                     logging.warning("Skipping non-results message %s", data)
+    #                     continue
+    #                 stt_event = live_transcription_to_speech_event(
+    #                     self._config.language, data
+    #                 )
+    #                 await self._event_queue.put(stt_event)
+    #                 continue
+    #         except Exception as e:
+    #             logging.error("Error handling message %s: %s", msg, e)
+    #             continue
 
-            logging.warning("Unhandled message %s", msg)
+    #         logging.warning("Unhandled message %s", msg)
 
-    async def _try_connect(
-        self, session: aiohttp.ClientSession
-    ) -> aiohttp.ClientWebSocketResponse:
-        """
-        International function.
-        This is to try to connect to the websocket.
-        """
-        live_config = {
-            "model": self._config.model,
-            "punctuate": self._config.punctuate,
-            "smart_format": self._config.smart_format,
-            "interim_results": self._config.interim_results,
-            "encoding": "linear16",
-            "sample_rate": self._sample_rate,
-            "channels": self._num_channels,
-            "endpointing": str(self._config.endpointing or "10"),
-        }
+    # async def _try_connect(
+    #     self, session: aiohttp.ClientSession
+    # ) -> aiohttp.ClientWebSocketResponse:
+    #     """
+    #     International function.
+    #     This is to try to connect to the websocket.
+    #     """
+    #     live_config = {
+    #         "model": self._config.model,
+    #         "punctuate": self._config.punctuate,
+    #         "smart_format": self._config.smart_format,
+    #         "interim_results": self._config.interim_results,
+    #         "encoding": "linear16",
+    #         "sample_rate": self._sample_rate,
+    #         "channels": self._num_channels,
+    #         "endpointing": str(self._config.endpointing or "10"),
+    #     }
 
-        if self._config.language:
-            live_config["language"] = self._config.language
+    #     if self._config.language:
+    #         live_config["language"] = self._config.language
 
-        query_params = urlencode(live_config).lower()
+    #     query_params = urlencode(live_config).lower()
 
-        url = f"wss://api.deepgram.com/v1/listen?{query_params}"
-        ws = await session.ws_connect(
-            url, headers={"Authorization": f"Token {self._api_key}"}
-        )
+    #     url = f"wss://api.deepgram.com/v1/listen?{query_params}"
+    #     ws = await session.ws_connect(
+    #         url, headers={"Authorization": f"Token {self._api_key}"}
+    #     )
 
-        return ws
+    #     return ws
 
     async def __anext__(self) -> stt.SpeechEvent:
         """
