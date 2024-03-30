@@ -20,7 +20,10 @@ from livekit.agents.utils import AudioBuffer, merge_frames
 
 from .models import WhisperStreamingLanguages, WhisperStreamingModels
 
-STREAM_KEEPALIVE_MSG: str = json.dumps({"type": "KeepAlive"})
+from faster_whisper import WhisperModel
+
+
+#STREAM_KEEPALIVE_MSG: str = json.dumps({"type": "KeepAlive"})
 STREAM_CLOSE_MSG: str = json.dumps({"type": "CloseStream"})
 
 
@@ -32,8 +35,10 @@ class STTOptions:
     interim_results: bool
     punctuate: bool
     model: WhisperStreamingModels
-    smart_format: bool
     endpointing: Optional[str]
+    vad: bool
+    min_chunk_size: float
+    device: str # "cuda" or "cpu"
 
 
 class STT(stt.STT):
@@ -46,7 +51,8 @@ class STT(stt.STT):
         model: WhisperStreamingModels = "large-v2",
         min_silence_duration: int = 10,
         vad: bool = True,
-        min_chunk_size:float=1.0
+        min_chunk_size:float=1.0,
+        device="cuda"
     ) -> None:
         super().__init__(streaming_supported=True)
 
@@ -58,7 +64,13 @@ class STT(stt.STT):
             endpointing=str(min_silence_duration),
             vad=vad,
             min_chunk_size=min_chunk_size,
+            device="cuda",
         )
+
+        # Run on GPU with FP16
+        self.model = WhisperModel(self._config.model, 
+                                  device=self._config.device, 
+                                  compute_type="float16")
 
     def _sanitize_options(
         self,
@@ -95,21 +107,26 @@ class STT(stt.STT):
             wav.setframerate(buffer.sample_rate)
             wav.writeframes(buffer.data)
 
-        async with aiohttp.ClientSession(
-            headers={
-                "Authorization": f"Token {self._api_key}",
-                "Accept": "application/json",
-                "Content-Type": "audio/wav",
-            }
-        ) as session:
-            async with session.post(
-                url=url,
-                data=io_buffer.getvalue(),
-            ) as res:
-                json_res = await res.json()
-                return prerecorded_transcription_to_speech_event(
-                    config.language, json_res
-                )
+        segments, info = self.model.transcribe(
+            wav,
+            vad_filter=self._config.vad,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
+
+        return stt.SpeechEvent(
+                is_final=True,
+                end_of_speech=True,
+                alternatives=[
+                    stt.SpeechData(
+                        language=language or "",
+                        start_time=seg.start,
+                        end_time=seg.end,
+                        confidence=seg.avg_logprob,
+                        text=seg.text or "",
+                    )
+                    for seg in segments
+                ],
+    )
 
     def stream(
         self,

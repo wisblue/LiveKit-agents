@@ -24,3 +24,11 @@ pip install livekit-agents
     # whisper-server-INFO: INFO: Listening on('localhost', 43007)
     ```
 
+
+- install LiveKit agent
+```bash
+cd /home/dennis/github/dnb/Eleanor/LiveKit-agents/livekit-agents
+
+pip install .
+```
+

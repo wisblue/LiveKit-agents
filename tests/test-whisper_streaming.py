@@ -1,6 +1,7 @@
 # ref: https://github.com/ufal/whisper_streaming?tab=readme-ov-file
 import sys
 sys.path.insert(1, '/home/dennis/github/dnb/Eleanor/stt/whisper_streaming')
+
 demo_audio_path= 'change-sophie.wav'
 # reset to store stderr to different file stream, e.g. open(os.devnull,"w")
 logfile = sys.stderr
