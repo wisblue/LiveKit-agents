@@ -1,10 +1,3 @@
-## Installation
-To install LiveKit plugin abstract classes:
-```bash
-pip install livekit-agents
-```
-
-
 ## Test for whisper_streaming
 - Starting whisper_streaming stt service
     - install faster-whiper and download models
@@ -14,6 +7,7 @@ pip install livekit-agents
     ```
 
     - start whisper_streaming stt server:
+        - ref: https://github.com/ufal/whisper_streaming
     ```bash
     $ python whisper_online_server.py --model large-v3
     # or using large-v2 bu default:
@@ -24,19 +18,24 @@ pip install livekit-agents
     # whisper-server-INFO: INFO: Listening on('localhost', 43007)
     ```
 
-
+- install LiveKit Python SDK
+    - ref: https://github.com/livekit/python-sdks
+        ```bash
+        pip install livekit
+        ```
+    
 - install LiveKit agent
-```bash
-cd LiveKit-agents/
+    ```bash
+    cd LiveKit-agents/
 
-pip install .
-```
+    pip install .
+    ```
 
-- test recognize function
+## test STT.recognize():
 ```bash
-cd /home/dennis/github/dnb/Eleanor/LiveKit-agents/livekit-plugins/livekit-plugins-whisper_streaming
+cd LiveKit-agents/livekit-plugins/livekit-plugins-whisper_streaming
 pip install . -U
 
-cd /home/dennis/github/dnb/Eleanor/LiveKit-agents/tests
+cd LiveKit-agents/tests
 python test_stt.py
 ```
