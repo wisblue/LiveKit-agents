@@ -3,8 +3,10 @@ import wave
 import os
 from livekit import rtc, agents
 #from livekit.plugins import deepgram, google, openai, silero, whisper_streaming
-from livekit.plugins import whisper_streaming
+from livekit.plugins import whisper_streaming, silero
 from difflib import SequenceMatcher
+
+import sys # for python version
 
 TEST_AUDIO_FILEPATH = os.path.join(os.path.dirname(__file__), "change-sophie.wav")
 TEST_AUDIO_TRANSCRIPT = "the people who are crazy enough to think they can change the world are the ones who do"
@@ -40,19 +42,20 @@ async def test_recognize():
         assert event.is_final
         assert event.end_of_speech
 
-    # for python version >=11
-    # async with asyncio.TaskGroup() as group:
-    #     for stt in stts:
-    #         group.create_task(recognize(stt))
-    # for python version 10
-    tasks = []
-    for stt in stts:
-        task = asyncio.create_task(recognize(stt))
-        tasks.append(task)
-    await asyncio.gather(*tasks)
+    if sys.version_info >= (3,11):
+        # for python version >=11
+        async with asyncio.TaskGroup() as group:
+            for stt in stts:
+                group.create_task(recognize(stt))
+    else: # for python version 10
+        tasks = []
+        for stt in stts:
+            task = asyncio.create_task(recognize(stt))
+            tasks.append(task)
+        await asyncio.gather(*tasks)
     
 async def test_stream():
-    silero_vad = silero.VAD()
+    #silero_vad = silero.VAD()
     stts = [
         # deepgram.STT(),
         # google.STT(),
@@ -78,6 +81,7 @@ async def test_stream():
 
     async def stream(stt: agents.stt.STT):
         stream = stt.stream()
+        stream._config.vad = False
         for frame in frames:
             stream.push_frame(frame)
             await asyncio.sleep(0.01)
@@ -93,11 +97,22 @@ async def test_stream():
 
         await stream.aclose()
 
-    async with asyncio.TaskGroup() as group:
+    if sys.version_info >= (3,11):
+        # for python version >=11
+        async with asyncio.TaskGroup() as group:
+            for stt in stts:
+                group.create_task(stream(stt))
+    else: # for python version 10
+        tasks = []
         for stt in stts:
-            group.create_task(stream(stt))
+            task = asyncio.create_task(stream(stt))
+            tasks.append(task)
+        await asyncio.gather(*tasks)
 
 
-# loop = asyncio.get_event_loop()
-# loop.run_until_complete(test_recognize())
+print("Testing STT:")
 asyncio.run(test_recognize())
+print()
+
+print("Testing stream:")
+asyncio.run(test_stream())

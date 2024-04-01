@@ -23,6 +23,7 @@ from . models import WhisperStreamingLanguages, WhisperStreamingModels
 from faster_whisper import WhisperModel
 
 import math
+import numpy as np
 
 
 #STREAM_KEEPALIVE_MSG: str = json.dumps({"type": "KeepAlive"})
@@ -138,6 +139,7 @@ class STT(stt.STT):
         language: Optional[Union[WhisperStreamingLanguages, str]] = None,
     ) -> "SpeechStream":
         config = self._sanitize_options(language=language)
+        config.vad = False
         return SpeechStream(
             config,
         )
@@ -159,19 +161,18 @@ class SpeechStream(stt.SpeechStream):
         self._config = config
         self._sample_rate = sample_rate
         self._num_channels = num_channels
-        self._api_key = api_key
         self.asr = FasterWhisperASR(self._config.language, self._config.model)  # loads and wraps Whisper model
         if self._config.vad:
             self.asr.use_vad()
-        self.online = OnlineASRProcessor(asr)
+        self.online = OnlineASRProcessor(self.asr)
         self._queue = asyncio.Queue()
         self._event_queue = asyncio.Queue[stt.SpeechEvent]()
         self._closed = False
-        self._main_task = asyncio.create_task(self._run(max_retry=32))
+        self._main_task = asyncio.create_task(self._run())
 
         def log_exception(task: asyncio.Task) -> None:
             if not task.cancelled() and task.exception():
-                logging.error(f"deepgram task failed: {task.exception()}")
+                logging.error(f"whisper_streaming task failed: {task.exception()}")
 
         self._main_task.add_done_callback(log_exception)
 
@@ -216,6 +217,8 @@ class SpeechStream(stt.SpeechStream):
                     await asyncio.wait_for(listen_task, timeout=5)
                     break
             except Exception as e:
+                print(e)
+                break
                 pass
  
         self._closed = True
@@ -233,8 +236,9 @@ class SpeechStream(stt.SpeechStream):
             self._queue.task_done()
 
             if isinstance(data, rtc.AudioFrame):
+                audio_data = np.frombuffer(data.data, dtype=np.float32) / (2 ** 15)
                 # await ws.send_bytes(data.data.tobytes())
-                await online.insert_audio_chunk(data)
+                await online.insert_audio_chunk(audio_data)
             else:
                 if data == STREAM_CLOSE_MSG:
                     return True
@@ -249,21 +253,20 @@ class SpeechStream(stt.SpeechStream):
         3. put stt_event to event_queue
         """
         while True:
-            msg = await online.process_iter()
-            if msg[0] is None and msg[1] is None:
-                break
-
             try:
+                b,e,t,c = online.process_iter()
+                if bytes is None and e is None:
+                    break
                 stt_event = live_transcription_to_speech_event(
-                    self._config.language, msg
+                    self._config.language, (b,e,t,c)
                 )
                 await self._event_queue.put(stt_event)
                 continue
-            except Exception as e:
-                logging.error("Error handling message %s: %s", msg, e)
+            except Exception as ecpt:
+                logging.error("Error handling message %s: %s", (b,e,t,c), ecpt)
                 continue
 
-            logging.warning("Unhandled message %s", msg)
+            logging.warning("Unhandled message %s", (b,e,t,c))
 
     async def __anext__(self) -> stt.SpeechEvent:
         """

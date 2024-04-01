@@ -31,6 +31,20 @@
     pip install .
     ```
 
+- install silero
+    ```bash
+    cd LiveKit-agents/livekit-plugins/livekit-plugins-silero
+    pip install .
+    ```
+
+- install silero-vad
+    ```bash
+    git clone https://github.com/wisblue/silero-vad.git
+    cd silero-vad
+    pip install torchaudio -U
+    pip install onnxruntime
+    ```
+
 ## test STT.recognize():
 ```bash
 cd LiveKit-agents/livekit-plugins/livekit-plugins-whisper_streaming
