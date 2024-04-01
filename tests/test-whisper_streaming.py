@@ -1,6 +1,6 @@
 # ref: https://github.com/ufal/whisper_streaming?tab=readme-ov-file
 import sys
-sys.path.insert(1, '/home/dennis/github/dnb/Eleanor/stt/whisper_streaming')
+sys.path.insert(1, '/home/dennis/github/dnb/Eleanor/whisper_streaming')
 
 demo_audio_path= 'change-sophie.wav'
 # reset to store stderr to different file stream, e.g. open(os.devnull,"w")
@@ -17,6 +17,22 @@ min_chunk = 1.0
 
 from whisper_online import *
 from functools import lru_cache
+
+# data strcture defined in livekit plugin
+# @dataclass
+# class SpeechData:
+#     language: str
+#     text: str
+#     start_time: float = 0.0
+#     end_time: float = 0.0
+#     confidence: float = 0.0  # [0, 1]
+
+
+# @dataclass
+# class SpeechEvent:
+#     is_final: bool
+#     alternatives: List[SpeechData]
+#     end_of_speech: bool = False
 
 @lru_cache
 def load_audio(fname):
@@ -50,7 +66,7 @@ asr = FasterWhisperASR(language, model)  # loads and wraps Whisper model
 # asr.set_translate_task()  # it will translate from lan into English
 asr.use_vad()  # set using VAD
 
-online = OnlineASRProcessor(asr)  # create processing object with default buffer trimming option
+online = OnlineASRProcessorEx(asr)  # create processing object with default buffer trimming option
 
 # warm-up
 # load the audio into the LRU cache before we start the timer
@@ -107,5 +123,7 @@ while True:
         end += min_chunk
 now = duration
 
+print("**********")
 o = online.finish()
+print(o)
 output_transcript(o, now=end)

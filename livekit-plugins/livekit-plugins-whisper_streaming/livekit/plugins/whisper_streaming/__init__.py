@@ -3,7 +3,7 @@ from .version import __version__
 
 __all__ = [
     "STT",
-    #"SpeechStream",
+    "SpeechStream",
     "__version__",
 ]
 

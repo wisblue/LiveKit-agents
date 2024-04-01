@@ -2,7 +2,8 @@ import asyncio
 import wave
 import os
 from livekit import rtc, agents
-from livekit.plugins import deepgram, google, openai, silero
+#from livekit.plugins import deepgram, google, openai, silero, whisper_streaming
+from livekit.plugins import whisper_streaming
 from difflib import SequenceMatcher
 
 TEST_AUDIO_FILEPATH = os.path.join(os.path.dirname(__file__), "change-sophie.wav")
@@ -25,27 +26,39 @@ def read_wav_file(filename: str) -> rtc.AudioFrame:
 
 
 async def test_recognize():
-    stts = [deepgram.STT(), google.STT(), openai.STT()]
+    stts = [
+        # deepgram.STT(), google.STT(), openai.STT(),
+        whisper_streaming.STT()]
     frame = read_wav_file(TEST_AUDIO_FILEPATH)
 
     async def recognize(stt: agents.stt.STT):
         event = await stt.recognize(buffer=frame)
         text = event.alternatives[0].text
+        print(text)
+        print(event)
         assert SequenceMatcher(None, text, TEST_AUDIO_TRANSCRIPT).ratio() > 0.9
         assert event.is_final
         assert event.end_of_speech
 
-    async with asyncio.TaskGroup() as group:
-        for stt in stts:
-            group.create_task(recognize(stt))
-
-
+    # for python version >=11
+    # async with asyncio.TaskGroup() as group:
+    #     for stt in stts:
+    #         group.create_task(recognize(stt))
+    # for python version 10
+    tasks = []
+    for stt in stts:
+        task = asyncio.create_task(recognize(stt))
+        tasks.append(task)
+    await asyncio.gather(*tasks)
+    
 async def test_stream():
     silero_vad = silero.VAD()
     stts = [
-        deepgram.STT(),
-        google.STT(),
-        agents.stt.StreamAdapter(openai.STT(), silero_vad.stream()),
+        # deepgram.STT(),
+        # google.STT(),
+        # agents.stt.StreamAdapter(openai.STT(), 
+        # silero_vad.stream()),
+        whisper_streaming.STT(),
     ]
     frame = read_wav_file(TEST_AUDIO_FILEPATH)
 
@@ -73,6 +86,7 @@ async def test_stream():
         async for event in stream:
             if event.is_final:
                 text = event.alternatives[0].text
+                print(text)
                 assert SequenceMatcher(None, text, TEST_AUDIO_TRANSCRIPT).ratio() > 0.8
                 assert event.end_of_speech
                 break
@@ -82,3 +96,8 @@ async def test_stream():
     async with asyncio.TaskGroup() as group:
         for stt in stts:
             group.create_task(stream(stt))
+
+
+# loop = asyncio.get_event_loop()
+# loop.run_until_complete(test_recognize())
+asyncio.run(test_recognize())

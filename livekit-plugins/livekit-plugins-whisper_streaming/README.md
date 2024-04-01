@@ -5,7 +5,7 @@ pip install livekit-agents
 ```
 
 
-## Running
+## Test for whisper_streaming
 - Starting whisper_streaming stt service
     - install faster-whiper and download models
     ref: https://github.com/SYSTRAN/faster-whisper
@@ -27,8 +27,16 @@ pip install livekit-agents
 
 - install LiveKit agent
 ```bash
-cd /home/dennis/github/dnb/Eleanor/LiveKit-agents/livekit-agents
+cd LiveKit-agents/
 
 pip install .
 ```
 
+- test recognize function
+```bash
+cd /home/dennis/github/dnb/Eleanor/LiveKit-agents/livekit-plugins/livekit-plugins-whisper_streaming
+pip install . -U
+
+cd /home/dennis/github/dnb/Eleanor/LiveKit-agents/tests
+python test_stt.py
+```

@@ -1,6 +1,6 @@
 import sys
-sys.path.insert(1, '/home/dennis/github/dnb/Eleanor/stt/whisper_streaming')
-
+sys.path.insert(1, '/home/dennis/github/dnb/Eleanor/whisper_streaming')
+from whisper_online import *
 
 import asyncio
 import dataclasses
@@ -18,9 +18,11 @@ from livekit import rtc
 from livekit.agents import stt
 from livekit.agents.utils import AudioBuffer, merge_frames
 
-from .models import WhisperStreamingLanguages, WhisperStreamingModels
+from . models import WhisperStreamingLanguages, WhisperStreamingModels
 
 from faster_whisper import WhisperModel
+
+import math
 
 
 #STREAM_KEEPALIVE_MSG: str = json.dumps({"type": "KeepAlive"})
@@ -60,6 +62,7 @@ class STT(stt.STT):
             language=language,
             detect_language=detect_language,
             interim_results=interim_results,
+            punctuate=False,
             model=model,
             endpointing=str(min_silence_duration),
             vad=vad,
@@ -96,19 +99,20 @@ class STT(stt.STT):
         buffer: AudioBuffer,
         language: Optional[Union[WhisperStreamingLanguages, str]] = None,
     ) -> stt.SpeechEvent:
-        config = self._sanitize_options(language=language)
-
         # whisper_streaming requires WAV, so we write our PCM into a wav buffer
         buffer = merge_frames(buffer)
         io_buffer = io.BytesIO()
+        # open as write and read mode
         with wave.open(io_buffer, "wb") as wav:
             wav.setnchannels(buffer.num_channels)
             wav.setsampwidth(2)  # 16-bit
             wav.setframerate(buffer.sample_rate)
             wav.writeframes(buffer.data)
 
+        # do not forget to move the cursor to begin of file.
+        io_buffer.seek(0)
         segments, info = self.model.transcribe(
-            wav,
+            io_buffer,
             vad_filter=self._config.vad,
             vad_parameters=dict(min_silence_duration_ms=500),
         )
@@ -118,11 +122,11 @@ class STT(stt.STT):
                 end_of_speech=True,
                 alternatives=[
                     stt.SpeechData(
-                        language=language or "",
+                        language=info.language,
                         start_time=seg.start,
                         end_time=seg.end,
-                        confidence=seg.avg_logprob,
-                        text=seg.text or "",
+                        confidence=math.exp(seg.avg_logprob),
+                        text=seg.text.strip() or "",
                     )
                     for seg in segments
                 ],
@@ -136,7 +140,6 @@ class STT(stt.STT):
         config = self._sanitize_options(language=language)
         return SpeechStream(
             config,
-            api_key=self._api_key,
         )
 
 
@@ -149,7 +152,6 @@ class SpeechStream(stt.SpeechStream):
     def __init__(
         self,
         config: STTOptions,
-        api_key: str,
         sample_rate: int = 16000,
         num_channels: int = 1,
     ) -> None:
@@ -158,7 +160,10 @@ class SpeechStream(stt.SpeechStream):
         self._sample_rate = sample_rate
         self._num_channels = num_channels
         self._api_key = api_key
-
+        self.asr = FasterWhisperASR(self._config.language, self._config.model)  # loads and wraps Whisper model
+        if self._config.vad:
+            self.asr.use_vad()
+        self.online = OnlineASRProcessor(asr)
         self._queue = asyncio.Queue()
         self._event_queue = asyncio.Queue[stt.SpeechEvent]()
         self._closed = False
@@ -196,130 +201,69 @@ class SpeechStream(stt.SpeechStream):
         await self._queue.put(STREAM_CLOSE_MSG)
         await self._main_task
 
-    # async def _run(self, max_retry: int) -> None:
-    #     """
-    #     Internal function.
-    #     Try to connect to Deepgram with exponential backoff and forward frames
-    #     """
-    #     async with aiohttp.ClientSession() as session:
-    #         retry_count = 0
-    #         ws: Optional[aiohttp.ClientWebSocketResponse] = None
-    #         listen_task: Optional[asyncio.Task] = None
-    #         keepalive_task: Optional[asyncio.Task] = None
-    #         while True:
-    #             try:
-    #                 ws = await self._try_connect(session)
-    #                 listen_task = asyncio.create_task(self._listen_loop(ws))
-    #                 keepalive_task = asyncio.create_task(self._keepalive_loop(ws))
-    #                 # break out of the retry loop if we are done
-    #                 if await self._send_loop(ws):
-    #                     keepalive_task.cancel()
-    #                     await asyncio.wait_for(listen_task, timeout=5)
-    #                     break
-    #             except Exception as e:
-    #                 if retry_count > max_retry and max_retry > 0:
-    #                     logging.error(f"failed to connect to Deepgram: {e}")
-    #                     break
+    async def _run(self) -> None:
+        """
+        Internal function.
+        Try to connect to Deepgram with exponential backoff and forward frames
+        """
+        # this 
+        while True:
+            try:
+                # create a task to listen to the websocket and parse the results.
+                listen_task = asyncio.create_task(self._listen_loop(self.online))
+                # break out of the retry loop if we are done
+                if await self._send_loop(self.online):
+                    await asyncio.wait_for(listen_task, timeout=5)
+                    break
+            except Exception as e:
+                pass
+ 
+        self._closed = True
 
-    #                 retry_delay = min(retry_count * 5, 5)  # max 5s
-    #                 retry_count += 1
-    #                 logging.warning(
-    #                     f"failed to connect to Deepgram: {e} - retrying in {retry_delay}s"
-    #                 )
-    #                 await asyncio.sleep(retry_delay)
+    async def _send_loop(self, online: OnlineASRProcessor) -> bool:
+        """
+        International function.
+        this is to send audio frames to the websocket.
+        """
+        while True:
+            # wait for the next frame
+            data = await self._queue.get()
+            # fire and forget, we don't care if we miss frames in the error case
+            # we will just keep sending the next frame
+            self._queue.task_done()
 
-    #     self._closed = True
+            if isinstance(data, rtc.AudioFrame):
+                # await ws.send_bytes(data.data.tobytes())
+                await online.insert_audio_chunk(data)
+            else:
+                if data == STREAM_CLOSE_MSG:
+                    return True
+        return False
 
-    # async def _send_loop(self, ws: aiohttp.ClientWebSocketResponse) -> bool:
-    #     """
-    #     International function.
-    #     this is to send audio frames to the websocket.
-    #     """
-    #     while not ws.closed:
-    #         data = await self._queue.get()
-    #         # fire and forget, we don't care if we miss frames in the error case
-    #         self._queue.task_done()
+    async def _listen_loop(self, online: OnlineASRProcessor) -> None:
+        """
+        International function.
+        This is to listen to the websocket and parse the results.
+        1. get data from ws message
+        2. convert data to stt_event
+        3. put stt_event to event_queue
+        """
+        while True:
+            msg = await online.process_iter()
+            if msg[0] is None and msg[1] is None:
+                break
 
-    #         if ws.closed:
-    #             raise Exception("websocket closed")
+            try:
+                stt_event = live_transcription_to_speech_event(
+                    self._config.language, msg
+                )
+                await self._event_queue.put(stt_event)
+                continue
+            except Exception as e:
+                logging.error("Error handling message %s: %s", msg, e)
+                continue
 
-    #         if isinstance(data, rtc.AudioFrame):
-    #             await ws.send_bytes(data.data.tobytes())
-    #         else:
-    #             if data == STREAM_CLOSE_MSG:
-    #                 await ws.send_str(data)
-    #                 return True
-    #     return False
-
-    # async def _keepalive_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-    #     """
-    #     International function.
-    #     This is to keep the websocket alive.
-    #     """
-    #     while not ws.closed:
-    #         await ws.send_str(STREAM_KEEPALIVE_MSG)
-    #         await asyncio.sleep(5)
-
-    # async def _listen_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-    #     """
-    #     International function.
-    #     This is to listen to the websocket and parse the results.
-    #     """
-    #     while not ws.closed:
-    #         msg = await ws.receive()
-    #         if msg.type in (
-    #             aiohttp.WSMsgType.CLOSED,
-    #             aiohttp.WSMsgType.CLOSE,
-    #             aiohttp.WSMsgType.CLOSING,
-    #         ):
-    #             break
-
-    #         try:
-    #             if msg.type == aiohttp.WSMsgType.TEXT:
-    #                 data = json.loads(msg.data)
-    #                 if data["type"] != "Results":
-    #                     logging.warning("Skipping non-results message %s", data)
-    #                     continue
-    #                 stt_event = live_transcription_to_speech_event(
-    #                     self._config.language, data
-    #                 )
-    #                 await self._event_queue.put(stt_event)
-    #                 continue
-    #         except Exception as e:
-    #             logging.error("Error handling message %s: %s", msg, e)
-    #             continue
-
-    #         logging.warning("Unhandled message %s", msg)
-
-    # async def _try_connect(
-    #     self, session: aiohttp.ClientSession
-    # ) -> aiohttp.ClientWebSocketResponse:
-    #     """
-    #     International function.
-    #     This is to try to connect to the websocket.
-    #     """
-    #     live_config = {
-    #         "model": self._config.model,
-    #         "punctuate": self._config.punctuate,
-    #         "smart_format": self._config.smart_format,
-    #         "interim_results": self._config.interim_results,
-    #         "encoding": "linear16",
-    #         "sample_rate": self._sample_rate,
-    #         "channels": self._num_channels,
-    #         "endpointing": str(self._config.endpointing or "10"),
-    #     }
-
-    #     if self._config.language:
-    #         live_config["language"] = self._config.language
-
-    #     query_params = urlencode(live_config).lower()
-
-    #     url = f"wss://api.deepgram.com/v1/listen?{query_params}"
-    #     ws = await session.ws_connect(
-    #         url, headers={"Authorization": f"Token {self._api_key}"}
-    #     )
-
-    #     return ws
+            logging.warning("Unhandled message %s", msg)
 
     async def __anext__(self) -> stt.SpeechEvent:
         """
@@ -345,50 +289,47 @@ class SpeechStream(stt.SpeechStream):
 
 def live_transcription_to_speech_event(
     language: Optional[str],
-    event: dict,
+    event: tuple,
 ) -> stt.SpeechEvent:
-    try:
-        dg_alts = event["channel"]["alternatives"]
-    except KeyError:
-        raise ValueError("no alternatives in response")
-
+    """
+    This function is to convert live transcription to speech event.
+    """
     return stt.SpeechEvent(
-        is_final=event["is_final"] or False,  # could be None?
-        end_of_speech=event["speech_final"] or False,
+        is_final=event[3] or False,  # could be None?
+        end_of_speech=event[3] or False,
         alternatives=[
             stt.SpeechData(
                 language=language or "",
-                start_time=(alt["words"][0]["start"] if alt["words"] else 0) or 0,
-                end_time=(alt["words"][-1]["end"] if alt["words"] else 0) or 0,
-                confidence=alt["confidence"] or 0,
-                text=alt["transcript"] or "",
+                start_time=event[0] or 0,
+                end_time=event[1] or 0,
+                confidence=None,
+                text=event[2] or "",
             )
-            for alt in dg_alts
         ],
     )
 
 
-def prerecorded_transcription_to_speech_event(
-    language: Optional[str],
-    event: dict,
-) -> stt.SpeechEvent:
-    try:
-        dg_alts = event["results"]["channels"][0]["alternatives"]
-    except KeyError:
-        raise ValueError("no alternatives in response")
+# def prerecorded_transcription_to_speech_event(
+#     language: Optional[str],
+#     event: dict,
+# ) -> stt.SpeechEvent:
+#     try:
+#         dg_alts = event["results"]["channels"][0]["alternatives"]
+#     except KeyError:
+#         raise ValueError("no alternatives in response")
 
-    return stt.SpeechEvent(
-        is_final=True,
-        end_of_speech=True,
-        alternatives=[
-            stt.SpeechData(
-                language=language or "",
-                start_time=(alt["words"][0]["start"] if alt["words"] else 0) or 0,
-                end_time=(alt["words"][-1]["end"] if alt["words"] else 0) or 0,
-                confidence=alt["confidence"] or 0,
-                # not sure why transcript is Optional inside DG SDK ...
-                text=alt["transcript"] or "",
-            )
-            for alt in dg_alts
-        ],
-    )
+#     return stt.SpeechEvent(
+#         is_final=True,
+#         end_of_speech=True,
+#         alternatives=[
+#             stt.SpeechData(
+#                 language=language or "",
+#                 start_time=(alt["words"][0]["start"] if alt["words"] else 0) or 0,
+#                 end_time=(alt["words"][-1]["end"] if alt["words"] else 0) or 0,
+#                 confidence=alt["confidence"] or 0,
+#                 # not sure why transcript is Optional inside DG SDK ...
+#                 text=alt["transcript"] or "",
+#             )
+#             for alt in dg_alts
+#         ],
+#     )
