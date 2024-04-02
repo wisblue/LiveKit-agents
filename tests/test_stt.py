@@ -84,10 +84,11 @@ async def test_stream():
         stream._config.vad = False
         for frame in frames:
             stream.push_frame(frame)
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
         await stream.flush()
         async for event in stream:
+            print(event)
             if event.is_final:
                 text = event.alternatives[0].text
                 print(text)

@@ -15,7 +15,7 @@ language = "en"  # source language
 # was received by this time.
 min_chunk = 1.0 
 
-from whisper_online import *
+from whisper_online_ex import *
 from functools import lru_cache
 
 # data strcture defined in livekit plugin
@@ -61,7 +61,7 @@ def output_transcript(o, now=None):
     else:
         print(o,file=logfile,flush=True)
 
-asr = FasterWhisperASR(language, model)  # loads and wraps Whisper model
+asr = FasterWhisperASREx(language, model)  # loads and wraps Whisper model
 # set options:
 # asr.set_translate_task()  # it will translate from lan into English
 asr.use_vad()  # set using VAD
@@ -100,17 +100,19 @@ beg = 0
 end = beg + min_chunk
 
 while True:
-    a = load_audio_chunk(demo_audio_path, beg,end)
+    a = load_audio_chunk(demo_audio_path, beg, end)
+    stream_close = end >= duration
     online.insert_audio_chunk(a)
     try:
-        o = online.process_iter()
+        o = online.process_iter(stream_close = stream_close)
     except AssertionError:
         print("assertion error",file=logfile)
         pass
     else:
-        output_transcript(o, now=end)
+        #output_transcript(o, now=end)
+        print(o)
 
-    print(f"## last processed {end:.2f}s",file=logfile,flush=True)
+    #print(f"## last processed {end:.2f}s",file=logfile,flush=True)
 
     if end >= duration:
         break
@@ -126,4 +128,4 @@ now = duration
 print("**********")
 o = online.finish()
 print(o)
-output_transcript(o, now=end)
+#output_transcript(o, now=end)
