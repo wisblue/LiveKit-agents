@@ -25,7 +25,7 @@ import ctypes
 
 #STREAM_KEEPALIVE_MSG: str = json.dumps({"type": "KeepAlive"})
 STREAM_CLOSE_MSG: str = json.dumps({"type": "CloseStream"})
-
+END_OF_FRAME = rtc.AudioFrame(data=b"", sample_rate=0, samples_per_channel=0, num_channels=0)
 
 # internal
 @dataclass
@@ -40,8 +40,49 @@ class STTOptions:
     min_chunk_size: float
     device: str # "cuda" or "cpu"
 
-def frame_duration(frame: rtc.AudioFrame) -> float:
-    return frame.samples_per_channel / frame.sample_rate
+class AudioFrameEx(rtc.AudioFrame):
+    def __init__(
+        self,
+        audio_frame: rtc.AudioFrame = None,
+        data: Union[bytes, bytearray, memoryview]=b"",
+        sample_rate: int=16000, # 16000 Hz (used in some audio codecs);44100 Hz (CD audio quality)
+        num_channels: int=1,
+        samples_per_channel: int=0,
+        stream_close: bool=False, # last frame in queue
+    ) -> None:
+        """
+        initialize with rtc.AudioFrame or parameter of AudioFrame.
+        added additional parameter stream_close to indicate the last frame in queue.
+        """
+        if audio_frame is None:
+            data = audio_frame.data, 
+            sample_rate = audio_frame.sample_rate, 
+            num_channels = audio_frame.num_channels, 
+            samples_per_channel = audio_frame.samples_per_channel
+        elif samples_per_channel == 0: 
+            samples_per_channel = len(data) // (num_channels * ctypes.sizeof(ctypes.c_int16))
+        super(AudioFrameEx, self).__init__(data, sample_rate, num_channels, samples_per_channel)
+        self.stream_close = stream_close
+        
+    @property
+    def duration(self) -> float:
+        """
+        to audio duration in seconds
+        """
+        return self.samples_per_channel / self.sample_rate
+
+    def to_numpy(self) -> np.ndarray:
+        """
+        This function is to convert audio frame to numpy array.
+        """
+        # Reshape the bytes array into a NumPy array
+        data_np = np.frombuffer(self.data, dtype=np.int16).reshape((-1, self.num_channels))
+        # Normalize the data to float32 in the range [-1, 1]
+        data_np = data_np.astype(np.float32) / np.iinfo(np.int16).max
+        return data_np
+            
+# def frame_duration(frame: rtc.AudioFrame) -> float:
+#     return frame.samples_per_channel / frame.sample_rate
 
 def audioFrame_to_numpy(frame: rtc.AudioFrame) -> np.ndarray:
     """
@@ -195,8 +236,6 @@ class SpeechStream(stt.SpeechStream):
         self._main_task.add_done_callback(log_exception)
 
         self._frameBuffer = []
-        self._frameBuffer_duration_seconds = 0
-        self._stream_close = False
 
     def push_frame(self, frame: rtc.AudioFrame) -> None:
         """
@@ -217,13 +256,14 @@ class SpeechStream(stt.SpeechStream):
         will be pushed to the stream.
         When the count of unfinished tasks drops to zero, _queue.join() unblocks.
         """
+        await self._queue.put(STREAM_CLOSE_MSG)
         await self._queue.join()
 
     async def aclose(self) -> None:
         """
         handles asynchronous stream closure.
         """
-        await self._queue.put(STREAM_CLOSE_MSG)
+        #await self._queue.put(STREAM_CLOSE_MSG)
         await self._main_task
 
     async def _run(self) -> None:
@@ -261,15 +301,16 @@ class SpeechStream(stt.SpeechStream):
             # fire and forget, we don't care if we miss frames in the error case
             # we will just keep sending the next frame
             self._queue.task_done()
-
+            
             if isinstance(frame, rtc.AudioFrame):
                 self._frameBuffer.append(frame)
-                self._frameBuffer_duration_seconds += frame_duration(frame)
-                self._stream_close = False
+                #print(f'len(self._frameBuffer={len(self._frameBuffer)}')
                 return False
             else:
                 if frame == STREAM_CLOSE_MSG:
-                    self._stream_close = True
+                    self._frameBuffer.append(END_OF_FRAME)
+                    print("============", len(self._frameBuffer[-1].data))
+                    print("============", len(self._frameBuffer))
                     return True
         return False
             
@@ -279,16 +320,20 @@ class SpeechStream(stt.SpeechStream):
         This is to transcribe the audio frame.
         """
         # test if buffer accumalated over 1 second
-        if self._frameBuffer_duration_seconds > 1:
-            merged = merge_frames(self._frameBuffer)
-            # convert to numpy array
-            audio_chunk = audioFrame_to_numpy(merged)
-            online.insert_audio_chunk(audio_chunk)
-            b,e,t,c = online.process_iter(self._stream_close)
-            self._frameBuffer, self._frameBuffer_duration_seconds=[], 0
-            return (b,e,t,c)
+        print(f'len(self._frameBuffer={len(self._frameBuffer)}')
+        stream_close = False
+        if len(self._frameBuffer[-1].data) == 0:
+            merged = merge_frames(self._frameBuffer[:-1])
+            stream_close = True
         else:
-            return (None, None, "", False)
+            merged = merge_frames(self._frameBuffer)
+        # convert to numpy array
+        audio_chunk = audioFrame_to_numpy(merged)
+
+        online.insert_audio_chunk(audio_chunk)
+        b,e,t,c = online.process_iter(stream_close)
+        self._frameBuffer=[]
+        return (b,e,t,c)
 
 
     async def _listen_loop(self, online: OnlineASRProcessor) -> None:
@@ -301,7 +346,8 @@ class SpeechStream(stt.SpeechStream):
         """
         while not self._closed:
             await asyncio.sleep(0.01)
-            try:
+            #b,e,t,c = (None, None, '', None)
+            if len(self._frameBuffer) >= 100 or (len(self._frameBuffer)>0 and len(self._frameBuffer[-1].data)==0):
                 b,e,t,c = await self._transcribe(self.online)
                 if not b is None:
                     stt_event = live_transcription_to_speech_event(
@@ -309,9 +355,9 @@ class SpeechStream(stt.SpeechStream):
                     )
                     await self._event_queue.put(stt_event)
                     continue
-            except Exception as ecpt:
-                logging.error("Error handling message %s: %s", (b,e,t,c), ecpt)
-                continue
+            # except Exception as ecpt:
+            #     logging.error("Error handling message %s: %s", (b,e,t,c), ecpt)
+            #     continue
 
     async def __anext__(self) -> stt.SpeechEvent:
         """
