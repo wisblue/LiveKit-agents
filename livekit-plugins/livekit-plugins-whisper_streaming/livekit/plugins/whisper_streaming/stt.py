@@ -71,29 +71,16 @@ class AudioFrameEx(rtc.AudioFrame):
         """
         return self.samples_per_channel / self.sample_rate
 
-    def to_numpy(self) -> np.ndarray:
+    @staticmethod
+    def to_numpy(frame: rtc.AudioFrame) -> np.ndarray:
         """
-        This function is to convert audio frame to numpy array.
+        This function is to convert PCM16 audio frame to numpy array.
         """
         # Reshape the bytes array into a NumPy array
-        data_np = np.frombuffer(self.data, dtype=np.int16).reshape((-1, self.num_channels))
+        data_np = np.frombuffer(frame.data, dtype=np.int16).reshape((-1, frame.num_channels))
         # Normalize the data to float32 in the range [-1, 1]
         data_np = data_np.astype(np.float32) / np.iinfo(np.int16).max
         return data_np
-            
-# def frame_duration(frame: rtc.AudioFrame) -> float:
-#     return frame.samples_per_channel / frame.sample_rate
-
-def audioFrame_to_numpy(frame: rtc.AudioFrame) -> np.ndarray:
-    """
-    This function is to convert audio frame to numpy array.
-    """
-    # Reshape the bytes array into a NumPy array
-    data_np = np.frombuffer(frame.data, dtype=np.int16).reshape((-1, frame.num_channels))
-    # Normalize the data to float32 in the range [-1, 1]
-    data_np = data_np.astype(np.float32) / np.iinfo(np.int16).max
-    return data_np
-
 
 class STT(stt.STT):
     def __init__(
@@ -309,8 +296,6 @@ class SpeechStream(stt.SpeechStream):
             else:
                 if frame == STREAM_CLOSE_MSG:
                     self._frameBuffer.append(END_OF_FRAME)
-                    print("============", len(self._frameBuffer[-1].data))
-                    print("============", len(self._frameBuffer))
                     return True
         return False
             
@@ -328,11 +313,11 @@ class SpeechStream(stt.SpeechStream):
         else:
             merged = merge_frames(self._frameBuffer)
         # convert to numpy array
-        audio_chunk = audioFrame_to_numpy(merged)
+        audio_chunk = AudioFrameEx.to_numpy(merged)
+        self._frameBuffer=[]
 
         online.insert_audio_chunk(audio_chunk)
         b,e,t,c = online.process_iter(stream_close)
-        self._frameBuffer=[]
         return (b,e,t,c)
 
 
@@ -346,9 +331,12 @@ class SpeechStream(stt.SpeechStream):
         """
         while not self._closed:
             await asyncio.sleep(0.01)
-            #b,e,t,c = (None, None, '', None)
-            if len(self._frameBuffer) >= 100 or (len(self._frameBuffer)>0 and len(self._frameBuffer[-1].data)==0):
+            if len(self._frameBuffer) >= 100 or \
+                (len(self._frameBuffer)>0 and len(self._frameBuffer[-1].data)==0):
+                # begin, end, text, complete
                 b,e,t,c = await self._transcribe(self.online)
+                if c:
+                    online.finish()
                 if not b is None:
                     stt_event = live_transcription_to_speech_event(
                         self._config.language, (b,e,t,c)
